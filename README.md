@@ -13,7 +13,7 @@
 
 <br>
 
-### ****대회 개요**** <!-- 개요 와 내가 구현것들을 정리 --> 
+## ****대회 개요**** <!-- 개요 와 내가 구현것들을 정리 --> 
 
 ![outline](./assets/outline.png)
 
@@ -21,7 +21,7 @@
 
 <br>
 
-### Dataset
+## Dataset
 
 - Train.csv - the train set
     + Id : Unique identifier for each observation
@@ -42,7 +42,7 @@
 
 <br>
 
-### Evaulation
+## Evaulation
 
 ![evaluation](./assets/evaluation.png)
 
@@ -52,7 +52,7 @@
 
 <br><br/>
 
-### 대회 진행 과정      <!-- 프로젝트의 진행과정 --> 
+## 대회 진행 과정      <!-- 프로젝트의 진행과정 --> 
 
 1. EDA
 2. Data Preprocessing
@@ -61,9 +61,9 @@
 
 <br/>
 
-### 대회 구현 내용  <!-- 프로젝트내에서 의 나의 활동 내용에 대해서는 간단하게 개론의 정도로 --> 
+## 대회 구현 내용  <!-- 프로젝트내에서 의 나의 활동 내용에 대해서는 간단하게 개론의 정도로 --> 
 
-- library
+### library
 
 ```python
 import numpy as np
@@ -120,20 +120,16 @@ import optuna
 from optuna.samplers import TPESampler
 ```
 
-<br>
+<br><br>
 
-- EDA
+### EDA
 
 ![class](./assets/class%20distribution.png)
-
-<br>
 클래스에 많은 불균형이 존재함
 
 <br>
 
 ![outlier](./assets/outlier.png)
-
-<br>
 데이터에는 많은 치우침과 이상치가 보임
 
 <br>
@@ -143,9 +139,9 @@ from optuna.samplers import TPESampler
 <br>
 메타 데이터를 이용한 추가 적인 정보를 취합도 해봄  
 발병이 된 경우의 날짜 들이 있나 확인
-<br>
+<br><br>
 
-- Data Preprocessing
+### Data Preprocessing
 
 Feature selection -> LabelEncoding -> KNN Imputation -> (optional)calculate VIF -> (optional)apply PCA -> feature Scaling 로 진행
 
@@ -235,14 +231,14 @@ if feature_selection_3:
 
     train.shape
 ```
-<br>
+<br><br>
 
 두번째, SMOTE를 이용하여 클래스 간의 불균형을 조절 서로의 개수를 108:509=1000:1000 의 비율로 만들어 학습을 진행
 
 - 보통 이상치를 제거하여 노이즈를 줄여 일반적인 평가를 높여 보았지만, 오히려 점수가 떨어지는 현상이 생김
     + 이상치를 제거하지 않고 평가시, 점수가 0.05정도 좋아지는 것이 포착
 
-scaling을 위해 StandardSclaer 를 이용해 feature들 간의 feature를 맞췄다.
+scaling을 위해 StandardSclaer 를 이용해 feature들 간의 feature를 맞춤.
 
 <br>
 
@@ -257,21 +253,153 @@ def balance_logloss(y_true, y_pred):
     return logloss
 ```
 <br>
+
 모델의 evaluation metric을 준비  
 
 AutoML framework (optuna) 을 이용하여 Hyperparameter tuning 을 진행  
-우리는 ML framework를 각 모델에 맞춰 준비해줬다.
+우리는 ML framework를 각 모델에 맞춰 준비
 
 <br>
 
 세번째, 학습할 모델을 준비; Xgboost 와 deeplearning framework TabPFNNet 을 이용하였음  
 위 모델 2개를 Ensemble을 하고 학습하여 cross-validation을 하였음
 
+```python
+class Ensemble():
+    def __init__(self, trial=None):
+        self.imputer = KNNImputer()
+        self.optuna_trial = trial
+        self.classifiers = self._initialize_classifiers()
+
+    def _initialize_classifiers(self):
+        base_classifiers = [
+            XGBClassifier(tree_method='gpu_hist'),
+            TabPFNClassifier(N_ensemble_configurations=32, device='cuda:0')
+        ]
+
+        if self.optuna_trial:
+            optuna_classifiers = self._optuna_tuned_classifiers()
+            classifiers = base_classifiers + optuna_classifiers
+        else:
+            classifiers = base_classifiers
+
+        return classifiers
+
+    def _optuna_tuned_classifiers(self):
+        classifiers = []
+        for i in range(2):
+            if i < 1:
+                algorithm = "XGBoost"
+                
+                # 고정 파라미터 설정
+                tree_method='gpu_hist'
+
+                params = {
+                    'learning_rate': self.optuna_trial.suggest_float("learning_rate_" + algorithm + str(i), 0.01, 0.1),
+                    'max_depth': self.optuna_trial.suggest_int("max_depth_" + algorithm + str(i), 4, 10),
+                    'n_estimators': self.optuna_trial.suggest_int("n_estimators_" + algorithm + str(i), 100, 1000, step=100),
+                    'reg_lambda': self.optuna_trial.suggest_float("reg_lambda_" + algorithm + str(i), 0.1, 2.0),
+                    'colsample_bytree': self.optuna_trial.suggest_float("colsample_bytree_" + algorithm + str(i), 0.5, 1.0),
+                    'tree_method':tree_method
+                }
+                classifier = XGBClassifier(**params)
+            else:
+                algorithm = "TabPFN"
+                
+                # 고정 파라미터 설정
+                device='cuda:0'
+                seed= 42
+                params = {
+                    "N_ensemble_configurations": self.optuna_trial.suggest_int("N_ensemble_configurations_" + algorithm + str(i), 24, 64),
+                    "device": device,
+                    "seed": seed
+                }
+                classifier = TabPFNClassifier(**params)
+            classifiers.append(classifier)
+        return classifiers
+
+
+    def fit(self, X, y):
+        y = y.values
+        unique_classes, y = np.unique(y, return_inverse=True)
+        self.classes_ = unique_classes
+        self.imputer.fit(X)
+        for classifier in self.classifiers:
+            if isinstance(classifier, TabPFNClassifier):
+                classifier.fit(X, y, overwrite_warning=True)
+            else:
+                classifier.fit(X, y)
+
+    def predict_proba(self, X):
+        x = self.imputer.transform(X)
+        probabilities = np.stack([classifier.predict_proba(X) for classifier in self.classifiers])
+        averaged_probabilities = np.mean(probabilities, axis=0)
+        class_0_est_instances = averaged_probabilities[:, 0].sum()
+        others_est_instances = averaged_probabilities[:, 1:].sum()
+        new_probabilities = averaged_probabilities * np.array(
+            [[1 / (class_0_est_instances if i == 0 else others_est_instances) for i in
+              range(averaged_probabilities.shape[1])]])
+        return new_probabilities / np.sum(new_probabilities, axis=1, keepdims=1)
+```
+<br>
+
+```python
+# def training(model, x,y,y_meta):
+def training(model, X, y):
+    losses = []
+    best_loss = np.inf
+    if is_shuffle:
+        folds = StratifiedKFold(n_splits=K, random_state=42, shuffle= True)
+    else:
+        folds = StratifiedKFold(n_splits=K, shuffle=False)
+    
+    model.imputer.fit(X)
+    
+    for train_idx, val_idx in folds.split(X, y):
+        X_train = X.iloc[train_idx, :]
+        y_train = y.iloc[train_idx]
+        
+        X_val = X.iloc[val_idx, :]
+        y_val = y.iloc[val_idx]
+        
+#         y_train, y_val = y_meta.iloc[train_idx], y.iloc[val_idx]
+                
+        model.fit(X_train, y_train)
+        y_pred = model.predict_proba(X_val)
+        probabilities = np.concatenate((y_pred[:,:1], np.sum(y_pred[:,1:], 1, keepdims=True)), axis=1)
+        p0 = probabilities[:,:1]
+        p0[p0 > 0.86] = 1
+        p0[p0 < 0.14] = 0
+        y_p = np.empty((y_pred.shape[0],))
+        for i in range(y_pred.shape[0]):
+            if p0[i]>=0.5:
+                y_p[i]= False
+            else :
+                y_p[i]=True
+        y_pred = y_pred.reshape(-1, 2)
+        loss = evaluation_metric(y_val,y_pred)
+        losses.append(loss)
+        
+        avg_loss = np.mean(losses)
+        if avg_loss<best_loss:
+            best_model = model
+            best_loss = avg_loss
+            print('best_model_saved')
+            
+      
+    
+    print('LOSS: %.4f' % np.mean(best_loss))
+    return best_model
+    
+```
+
 <br>
 
 마지막으로, Prediction을 진행하여 대회에 제출함.
 
-- ***최종 성적***
+<br><br>
+
+### ***최종 성적***
 
 우리는 최종적으로 791/6431 등으로 아쉽게도 10%에 들지 못해 동메달을 수상하지는 못함  
 
